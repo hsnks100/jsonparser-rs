@@ -1,33 +1,14 @@
 use std::{collections::HashMap, error::Error, fmt};
 
-#[derive(Debug)]
-pub struct ParseError {
-    details: String,
-}
+use anyhow::{self, Context};
+use thiserror::Error;
 
-impl ParseError {
-    fn new(msg: &str) -> ParseError {
-        ParseError {
-            details: msg.to_string(),
-        }
-    }
-}
-
-impl fmt::Display for ParseError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self.details)
-    }
-}
-
-impl Error for ParseError {
-    fn description(&self) -> &str {
-        &self.details
-    }
-}
-
-#[derive(Debug)]
-pub enum Token<R> {
-    Start { rule: R, pos: i32 },
+#[derive(Error, Debug)]
+pub enum ParseError {
+    #[error("{}, pos: {}", .message, .pos)]
+    InvalidInput { message: String, pos: usize },
+    #[error("token error")]
+    TokenError,
 }
 
 #[derive(Debug)]
@@ -51,6 +32,7 @@ pub enum JsonToken {
 
 #[derive(Debug)]
 pub enum Content {
+    Null,
     Number(i32),
     StringLiteral(String),
     Object(HashMap<String, Content>),
@@ -58,18 +40,26 @@ pub enum Content {
 }
 
 impl Content {
-    pub fn get(&mut self, key: String) -> Option<&Content> {
+    pub fn get(&self, key: &str) -> &Content {
         if let Content::Object(h) = self {
-            h.get(&key)
+            let r = h.get(key);
+            match r {
+                Some(r) => r,
+                None => &Content::Null,
+            }
         } else {
-            None
+            &Content::Null
         }
     }
-    pub fn at(&mut self, index: usize) -> Option<&Content> {
+    pub fn at(&self, index: usize) -> &Content {
         if let Content::Array(h) = self {
-            h.get(index)
+            let r = h.get(index);
+            match r {
+                Some(r) => r,
+                None => &Content::Null,
+            }
         } else {
-            None
+            &Content::Null
         }
     }
 }
@@ -79,6 +69,16 @@ pub struct JsonParser {
 }
 
 impl JsonParser {
+    pub fn content_from_str(json_str: &str) -> Result<Content, ParseError> {
+        let mut jp = JsonParser::new2(json_str);
+        let content = jp.parse()?;
+        Ok(content)
+    }
+    pub fn new2(json_str: &str) -> Self {
+        Self {
+            tokenizer: Tokenizer::new(json_str.to_string()),
+        }
+    }
     pub fn new(tokenizer: Tokenizer) -> Self {
         Self { tokenizer } // <--
     }
@@ -99,10 +99,10 @@ impl JsonParser {
                 println!("parse result: {:?}", content);
                 Ok(content)
             }
-            _ => {
-                println!("parse error");
-                Err(ParseError::new("parse err"))
-            }
+            _ => Err(ParseError::InvalidInput {
+                message: "parse error".to_string(),
+                pos: t.pos,
+            }),
         }
     }
     pub fn parse_object(&mut self, content: &mut Content) -> Result<(), ParseError> {
@@ -113,14 +113,21 @@ impl JsonParser {
                 }
                 JsonToken::JsonString(value) => value.clone(),
                 _ => {
+                    return Err(ParseError::InvalidInput {
+                        message: "must be string".to_string(),
+                        pos: r.pos,
+                    });
                     // return Err(ParseError::new("must be string"));
-                    return Err(ParseError::new(&format!("must be string: pos: {}", r.pos)));
+                    // return Err(ParseError::InvalidInput(message: "must be string".to_string(), pos: {}", r.pos));
                 }
             };
             match self.tokenizer.get_token()?.kind {
                 JsonToken::Colon => {}
                 _ => {
-                    return Err(ParseError::new("must be :"));
+                    return Err(ParseError::InvalidInput {
+                        message: "must be :".to_string(),
+                        pos: r.pos,
+                    })
                 }
             }
             match (self.tokenizer.get_token()?.kind, &mut *content) {
@@ -213,21 +220,30 @@ impl Tokenizer {
     }
     pub fn get_token(&mut self) -> Result<JsonTokenWrap, ParseError> {
         loop {
-            let c = *self.source.get(self.pos).ok_or(ParseError::new("end"))?;
+            let c = *self.source.get(self.pos).ok_or(ParseError::InvalidInput {
+                message: "EOF".to_string(),
+                pos: self.pos,
+            })?;
             if c.is_numeric() {
                 let mut t = String::new();
                 let b = self.pos;
                 while self
                     .source
                     .get(self.pos)
-                    .ok_or(ParseError::new("end"))?
+                    .ok_or(ParseError::InvalidInput {
+                        message: "end".to_string(),
+                        pos: self.pos,
+                    })?
                     .is_numeric()
                 {
                     let a = self.source[self.pos];
                     t += &a.to_string();
                     self.pos += 1
                 }
-                let tnum = t.parse().or(Err(ParseError::new("string to num".into())))?;
+                let tnum = t.parse().or(Err(ParseError::InvalidInput {
+                    message: "string to num".to_string(),
+                    pos: b,
+                }))?;
                 let r = JsonToken::Number(tnum);
                 return Ok(JsonTokenWrap { pos: b, kind: r });
             } else if c == '{' {
@@ -291,7 +307,10 @@ impl Tokenizer {
                     kind: JsonToken::CloseArray,
                 });
             } else {
-                return Err(ParseError::new("failed to parse"));
+                return Err(ParseError::InvalidInput {
+                    message: "failed to parse".to_string(),
+                    pos: self.pos,
+                });
             }
         }
     }
